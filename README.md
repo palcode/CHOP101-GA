@@ -1,114 +1,152 @@
 # RGBD-GPS Sensor Fusion System
 
-A real-time sensor fusion system that combines RealSense RGBD camera data with GPS information for improved localization and tracking.
+A comprehensive sensor fusion system that integrates RGBD camera data with GPS information for accurate localization and tracking. The system uses visual odometry techniques for relative motion estimation and GPS for absolute position reference.
 
 ## Features
 
-- Real-time fusion of RGBD camera and GPS data
-- Visual odometry using ORB feature detection
-- 3D trajectory visualization
-- GPS position tracking with map overlay
-- Depth visualization and processing
-- Interactive web-based interface
+- Real-time RGBD camera processing using Intel RealSense
+- Visual odometry using ORB features
+- GPS integration and coordinate conversion
+- Thread-safe operation
+- Confidence-based sensor fusion
+- Interactive visualization dashboard
+- Docker support for easy deployment
 
-## System Components
+## Prerequisites
 
-1. **GPS Driver (`gps_driver.py`)**
-   - Handles GPS device communication
-   - Parses NMEA sentences
-   - Provides real-time GPS data
-
-2. **Sensor Fusion (`sensor_fusion.py`)**
-   - Combines visual odometry with GPS data
-   - Implements feature detection and matching
-   - Provides real-time pose estimation
-   - Handles sensor synchronization
-
-3. **Visualization (`fusion_visualizer.py`)**
-   - Real-time data visualization
-   - Interactive 3D trajectory plotting
-   - GPS position mapping
-   - RGBD camera feed display
-
-## Requirements
-
-- Python 3.8+
-- Intel RealSense Camera
-- GPS Module (NMEA compatible)
-- Required Python packages (see `requirements.txt`)
+- Python 3.8 or higher
+- Intel RealSense SDK 2.0
+- GPS module (compatible with NMEA protocol)
+- Docker (optional, for containerized deployment)
 
 ## Installation
 
-1. Install the required packages:
+### Option 1: Local Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/rgbd-gps-fusion.git
+cd rgbd-gps-fusion
+```
+
+2. Create a virtual environment (recommended):
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+3. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Connect your hardware:
-   - Intel RealSense camera via USB
-   - GPS module via serial port
+### Option 2: Docker Installation
+
+1. Build the Docker image:
+```bash
+docker build -t rgbd-gps-fusion .
+```
+
+2. Run the container:
+```bash
+docker run --privileged \
+    -v /dev:/dev \
+    -p 8501:8501 \
+    --device=/dev/ttyUSB0:/dev/ttyUSB0 \
+    rgbd-gps-fusion
+```
+
+Note: The `--privileged` flag and device mapping are required for accessing the RealSense camera and GPS module.
 
 ## Usage
 
-1. Start the visualization system:
+### Running the Sensor Fusion System
+
+1. Start the main sensor fusion system:
+```bash
+python sensor_fusion.py
+```
+
+2. Launch the visualization dashboard:
 ```bash
 streamlit run fusion_visualizer.py
 ```
 
-2. In the web interface:
-   - Configure GPS port and baudrate
-   - Click "Start System" to begin
-   - Monitor real-time sensor fusion results
+3. Access the dashboard at `http://localhost:8501`
 
-## System Architecture
+### Configuration
 
-### Data Flow
+The system can be configured through the web interface or by modifying the following parameters:
+
+- GPS Settings:
+  - Port: Default `/dev/ttyUSB0`
+  - Baudrate: Default `9600`
+
+- Camera Settings:
+  - Resolution: 640x480 (default)
+  - FPS: 30 (default)
+
+### Visualization Features
+
+The dashboard provides:
+- Real-time RGB and depth camera feeds
+- 3D trajectory visualization
+- GPS position on interactive map
+- Sensor fusion statistics
+- Visual odometry metrics
+
+## Project Structure
+
 ```
-RealSense Camera → Visual Odometry → Sensor Fusion ←→ GPS Data
-         ↓             ↓                ↓
-    RGB Image    Feature Detection   Pose Estimation
-    Depth Map    Motion Tracking     Position Fusion
-         ↓             ↓                ↓
-                 Visualization
+rgbd-gps-fusion/
+├── sensor_fusion.py      # Core sensor fusion implementation
+├── fusion_visualizer.py  # Visualization dashboard
+├── gps_driver.py        # GPS communication module
+├── requirements.txt     # Python dependencies
+├── Dockerfile          # Docker configuration
+└── README.md          # Documentation
 ```
 
-### Key Components
+## Docker Support
 
-1. **Visual Odometry**
-   - ORB feature detection and matching
-   - Essential matrix computation
-   - Relative pose estimation
+The system is containerized using Docker for easy deployment. The Dockerfile includes:
+- Base image with Python and required system libraries
+- RealSense SDK installation
+- Application code and dependencies
+- Exposed ports for the web interface
+- Device mappings for hardware access
 
-2. **GPS Integration**
-   - NMEA sentence parsing
-   - Position conversion
-   - Data synchronization
+## Troubleshooting
 
-3. **Sensor Fusion**
-   - Weighted position averaging
-   - Confidence estimation
-   - Trajectory tracking
+1. GPS Connection Issues:
+   - Verify the correct port in device manager
+   - Check USB connections
+   - Ensure proper permissions
 
-4. **Visualization**
-   - Real-time camera feeds
-   - 3D trajectory plotting
-   - Interactive map display
-   - Sensor statistics
+2. Camera Issues:
+   - Verify RealSense SDK installation
+   - Check USB 3.0 connection
+   - Update firmware if needed
 
-## Configuration
+3. Visualization Issues:
+   - Check browser compatibility
+   - Verify port accessibility
+   - Check system resources
 
-The system can be configured through the web interface:
+## Contributing
 
-- GPS Port: Serial port for GPS module (default: /dev/ttyUSB0)
-- Baudrate: Communication speed (default: 9600)
-- Visualization options in the interface
-
-## Performance Considerations
-
-- Visual odometry requires good lighting and feature-rich environments
-- GPS accuracy depends on satellite visibility and signal quality
-- System performance may vary based on hardware capabilities
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a Pull Request
 
 ## License
 
-MIT License - Feel free to use and modify as needed.
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- Intel RealSense Team
+- OpenCV Community
+- Streamlit Team
