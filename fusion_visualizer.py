@@ -1,3 +1,32 @@
+"""
+RGBD-GPS Sensor Fusion Visualizer
+
+This module provides a real-time visualization interface for the sensor fusion system
+that combines RealSense RGBD camera data with GPS information. It uses Streamlit
+for the web interface and provides multiple visualization components including:
+- RGB and depth camera feeds
+- 3D trajectory visualization
+- GPS position mapping
+- Sensor fusion statistics
+
+The visualization system runs in a multi-threaded environment to ensure smooth
+real-time updates while maintaining responsive user interface.
+
+Key Components:
+    - EnhancedFusionVisualizer: Main class handling visualization and data processing
+    - create_map: Creates an interactive map with trajectory
+    - create_3d_trajectory: Generates 3D trajectory visualization
+    - main: Entry point and UI layout manager
+
+Dependencies:
+    - streamlit: Web interface framework
+    - folium: Map visualization
+    - opencv-python: Image processing
+    - plotly: 3D trajectory visualization
+    - numpy: Numerical computations
+    - sensor_fusion: Core sensor fusion functionality
+"""
+
 import streamlit as st
 import folium
 from streamlit_folium import folium_static
@@ -39,7 +68,24 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 class EnhancedFusionVisualizer:
+    """
+    A class that handles the visualization of sensor fusion data.
+    
+    This class manages the real-time visualization of RGBD camera feeds,
+    GPS data, and fusion results. It runs in a separate thread to ensure
+    smooth updates and responsive UI.
+    
+    Attributes:
+        fusion (LocalizationFusion): The sensor fusion system instance
+        is_running (bool): Flag indicating if the system is active
+        current_frame (np.ndarray): Latest RGB frame from camera
+        current_depth (np.ndarray): Latest depth frame from camera
+        trajectory (list): History of positions for trajectory visualization
+        lock (threading.Lock): Thread synchronization lock
+    """
+    
     def __init__(self):
+        """Initialize the visualization system with default values."""
         self.fusion = None
         self.is_running = False
         self.current_frame = None
@@ -48,7 +94,16 @@ class EnhancedFusionVisualizer:
         self.lock = threading.Lock()
         
     def start(self, gps_port: str, gps_baudrate: int) -> bool:
-        """Start the fusion system"""
+        """
+        Start the fusion and visualization system.
+        
+        Args:
+            gps_port (str): Serial port for GPS module
+            gps_baudrate (int): Baud rate for GPS communication
+            
+        Returns:
+            bool: True if successfully started, False otherwise
+        """
         self.fusion = LocalizationFusion(gps_port, gps_baudrate)
         if not self.fusion.start():
             return False
@@ -59,15 +114,28 @@ class EnhancedFusionVisualizer:
         return True
         
     def stop(self):
-        """Stop the fusion system"""
+        """
+        Stop the visualization system and cleanup resources.
+        
+        This method ensures proper shutdown of all components including
+        the fusion system and processing thread.
+        """
         self.is_running = False
         if self.fusion:
             self.fusion.stop()
         if hasattr(self, 'frame_thread'):
             self.frame_thread.join()
             
-    def _colorize_depth(self, depth_image):
-        """Convert depth image to colormap for visualization"""
+    def _colorize_depth(self, depth_image: np.ndarray) -> np.ndarray:
+        """
+        Convert depth image to colormap for better visualization.
+        
+        Args:
+            depth_image (np.ndarray): Raw depth image
+            
+        Returns:
+            np.ndarray: Colorized depth image using JET colormap
+        """
         if depth_image is None:
             return None
         normalized_depth = cv2.normalize(depth_image, None, 0, 255, cv2.NORM_MINMAX)
@@ -76,7 +144,13 @@ class EnhancedFusionVisualizer:
         return depth_colormap
             
     def _update_frame(self):
-        """Update the camera frame with visualization overlays"""
+        """
+        Main processing loop for frame updates.
+        
+        This method runs in a separate thread and continuously updates
+        the visualization data including camera feeds, pose information,
+        and trajectory history.
+        """
         while self.is_running:
             rgbd_data = self.fusion._get_rgbd_data()
             if rgbd_data is None:
@@ -113,8 +187,16 @@ class EnhancedFusionVisualizer:
             
             time.sleep(0.03)  # ~30 FPS
             
-    def get_current_data(self):
-        """Get the latest frame and depth data"""
+    def get_current_data(self) -> dict:
+        """
+        Get the latest sensor data for visualization.
+        
+        Returns:
+            dict: Dictionary containing:
+                - 'color': RGB camera frame
+                - 'depth': Raw depth frame
+                - 'depth_colored': Colorized depth visualization
+        """
         with self.lock:
             if self.current_frame is not None and self.current_depth is not None:
                 return {
@@ -124,8 +206,19 @@ class EnhancedFusionVisualizer:
                 }
             return None
 
-def create_map(latitude: float, longitude: float, trajectory=None, zoom: int = 15):
-    """Create a folium map with trajectory"""
+def create_map(latitude: float, longitude: float, trajectory: list = None, zoom: int = 15) -> folium.Map:
+    """
+    Create an interactive map with current position and trajectory.
+    
+    Args:
+        latitude (float): Current latitude
+        longitude (float): Current longitude
+        trajectory (list, optional): List of previous positions
+        zoom (int, optional): Initial map zoom level
+        
+    Returns:
+        folium.Map: Interactive map with markers and trajectory
+    """
     m = folium.Map(location=[latitude, longitude], zoom_start=zoom)
     
     # Add current position marker
@@ -152,8 +245,16 @@ def create_map(latitude: float, longitude: float, trajectory=None, zoom: int = 1
     
     return m
 
-def create_3d_trajectory(trajectory):
-    """Create a 3D trajectory plot using plotly"""
+def create_3d_trajectory(trajectory: list) -> go.Figure:
+    """
+    Create an interactive 3D plot of the movement trajectory.
+    
+    Args:
+        trajectory (list): List of position vectors
+        
+    Returns:
+        go.Figure: Plotly figure with 3D trajectory visualization
+    """
     if not trajectory:
         return None
         
@@ -188,6 +289,16 @@ def create_3d_trajectory(trajectory):
     return fig
 
 def main():
+    """
+    Main entry point for the visualization application.
+    
+    This function sets up the Streamlit interface and manages the
+    real-time updates of all visualization components. It handles:
+    - User interface layout
+    - Configuration options
+    - Real-time data updates
+    - Visualization components
+    """
     st.title("🤖 Enhanced Sensor Fusion Visualizer")
     
     # Initialize session state

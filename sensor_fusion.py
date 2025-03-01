@@ -1,5 +1,38 @@
 #!/usr/bin/env python3
 
+"""
+RGBD-GPS Sensor Fusion System
+
+This module implements a sensor fusion system that combines data from an
+Intel RealSense RGBD camera with GPS measurements to provide accurate
+localization and tracking. The system uses visual odometry techniques
+for relative motion estimation and GPS for absolute position reference.
+
+Key Features:
+    - Real-time RGBD camera processing
+    - Visual odometry using ORB features
+    - GPS integration and coordinate conversion
+    - Thread-safe operation
+    - Confidence-based fusion
+
+The system uses a weighted fusion approach that combines the high-frequency
+local measurements from visual odometry with the lower-frequency but absolute
+GPS positions. This provides robust localization even in challenging conditions
+like GPS signal loss or feature-poor environments.
+
+Classes:
+    - RGBDData: Container for RGBD camera data
+    - PoseEstimate: Container for pose estimation results
+    - LocalizationFusion: Main fusion system implementation
+
+Dependencies:
+    - pyrealsense2: Intel RealSense SDK
+    - opencv-python: Computer vision operations
+    - numpy: Numerical computations
+    - transforms3d: 3D transformation utilities
+    - scipy: Scientific computing utilities
+"""
+
 import pyrealsense2 as rs
 import numpy as np
 import cv2
@@ -17,25 +50,66 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RGBDData:
+    """
+    Container for RGBD camera data.
+    
+    Attributes:
+        color_frame (np.ndarray): RGB color image
+        depth_frame (np.ndarray): Depth image in millimeters
+        timestamp (float): Unix timestamp of frame capture
+    """
     color_frame: np.ndarray
     depth_frame: np.ndarray
     timestamp: float
 
 @dataclass
 class PoseEstimate:
+    """
+    Container for pose estimation results.
+    
+    Attributes:
+        position (np.ndarray): 3D position vector [x, y, z]
+        orientation (np.ndarray): Quaternion orientation [w, x, y, z]
+        confidence (float): Confidence measure [0-1]
+        timestamp (float): Unix timestamp of estimate
+    """
     position: np.ndarray  # [x, y, z]
     orientation: np.ndarray  # quaternion [w, x, y, z]
     confidence: float
     timestamp: float
 
 class LocalizationFusion:
+    """
+    Main class implementing the sensor fusion system.
+    
+    This class handles the integration of RGBD camera data with GPS
+    measurements to provide real-time pose estimation. It implements
+    visual odometry for local motion estimation and fuses it with
+    GPS data for global position correction.
+    
+    The system runs in a separate thread to ensure real-time
+    performance and provides thread-safe access to the latest
+    pose estimate.
+    
+    Attributes:
+        pipeline (rs.pipeline): RealSense pipeline
+        config (rs.config): RealSense configuration
+        gps (GPSDriver): GPS communication handler
+        prev_rgbd_data (RGBDData): Previous RGBD frame for visual odometry
+        current_pose (PoseEstimate): Latest fused pose estimate
+        orb (cv2.ORB): ORB feature detector
+        matcher (cv2.BFMatcher): Feature matcher
+        is_running (bool): System status flag
+        lock (threading.Lock): Thread synchronization lock
+    """
+    
     def __init__(self, gps_port: str = "/dev/ttyUSB0", gps_baudrate: int = 9600):
         """
-        Initialize the sensor fusion system
+        Initialize the fusion system.
         
         Args:
-            gps_port: Serial port for GPS module
-            gps_baudrate: Baud rate for GPS communication
+            gps_port (str): Serial port for GPS module
+            gps_baudrate (int): Baud rate for GPS communication
         """
         # Initialize RealSense pipeline
         self.pipeline = rs.pipeline()
@@ -65,7 +139,10 @@ class LocalizationFusion:
         
     def start(self) -> bool:
         """
-        Start the sensor fusion system
+        Start the fusion system.
+        
+        This method initializes the RealSense camera, connects to the
+        GPS module, and starts the processing thread.
         
         Returns:
             bool: True if successfully started, False otherwise
@@ -93,7 +170,12 @@ class LocalizationFusion:
             return False
             
     def stop(self):
-        """Stop the sensor fusion system"""
+        """
+        Stop the fusion system and cleanup resources.
+        
+        This method ensures proper shutdown of all components including
+        the RealSense pipeline, GPS connection, and processing thread.
+        """
         self.is_running = False
         if hasattr(self, 'process_thread'):
             self.process_thread.join()
@@ -101,12 +183,25 @@ class LocalizationFusion:
         self.gps.disconnect()
         
     def get_current_pose(self) -> PoseEstimate:
-        """Get the latest fused pose estimate"""
+        """
+        Get the latest fused pose estimate.
+        
+        Returns:
+            PoseEstimate: Current pose with position, orientation, and confidence
+        """
         with self.lock:
             return self.current_pose
             
     def _get_rgbd_data(self) -> Optional[RGBDData]:
-        """Get the latest RGBD data from RealSense"""
+        """
+        Get the latest RGBD data from RealSense camera.
+        
+        This method handles the communication with the RealSense
+        camera and converts the raw frames to numpy arrays.
+        
+        Returns:
+            Optional[RGBDData]: RGBD data if available, None otherwise
+        """
         try:
             frames = self.pipeline.wait_for_frames()
             color_frame = frames.get_color_frame()
@@ -126,10 +221,21 @@ class LocalizationFusion:
             
     def _estimate_visual_odometry(self, curr_data: RGBDData) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         """
-        Estimate relative motion using visual odometry
+        Estimate relative motion using visual odometry.
         
+        This method implements the visual odometry pipeline:
+        1. Feature detection using ORB
+        2. Feature matching between consecutive frames
+        3. Essential matrix computation
+        4. Relative pose recovery
+        
+        Args:
+            curr_data (RGBDData): Current RGBD frame
+            
         Returns:
-            Optional[Tuple[np.ndarray, np.ndarray]]: (relative_position, relative_orientation)
+            Optional[Tuple[np.ndarray, np.ndarray]]: 
+                Tuple of (position, orientation) if successful,
+                None if estimation fails
         """
         if self.prev_rgbd_data is None:
             self.prev_rgbd_data = curr_data
@@ -176,12 +282,18 @@ class LocalizationFusion:
                           visual_orientation: np.ndarray,
                           gps_data: GPSData) -> PoseEstimate:
         """
-        Fuse visual odometry and GPS measurements
+        Fuse visual odometry and GPS measurements.
+        
+        This method implements the sensor fusion algorithm:
+        1. Convert GPS coordinates to local frame
+        2. Weighted fusion of positions
+        3. Orientation from visual odometry
+        4. Confidence computation
         
         Args:
-            visual_position: Position estimate from visual odometry
-            visual_orientation: Orientation estimate from visual odometry
-            gps_data: GPS measurement
+            visual_position (np.ndarray): Position from visual odometry
+            visual_orientation (np.ndarray): Orientation from visual odometry
+            gps_data (GPSData): GPS measurement
             
         Returns:
             PoseEstimate: Fused pose estimate
@@ -217,7 +329,16 @@ class LocalizationFusion:
         )
         
     def _process_loop(self):
-        """Main processing loop for sensor fusion"""
+        """
+        Main processing loop for sensor fusion.
+        
+        This method runs in a separate thread and continuously:
+        1. Gets new RGBD data
+        2. Computes visual odometry
+        3. Reads GPS data
+        4. Performs sensor fusion
+        5. Updates the current pose estimate
+        """
         while self.is_running:
             # Get RGBD data
             rgbd_data = self._get_rgbd_data()
