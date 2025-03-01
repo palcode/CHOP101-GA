@@ -23,8 +23,8 @@ This document introduces the concept of Chat-Oriented Programming (CHOP), where 
 
 **Prompts in Cursor:**  
 >"Create a frontend module which can show near realtime location update on google map from the data from this driver,Use streamline for the UI."
+
 >"Can you write code for fusion of realsense rgbd camera data with gps data for better localisation @Codebase"
->"Can you update the viewer with more details like showing rgbd data along with gps data and final fused view @Codebase"
 
 
 ### **Use Case 3 : Unit test** 
