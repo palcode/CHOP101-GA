@@ -2,4 +2,9 @@ pyserial==3.5
 pynmea2==1.19.0
 streamlit==1.31.1
 folium==0.15.1
-streamlit-folium==0.18.0 
+streamlit-folium==0.18.0
+pyrealsense2==2.54.1
+numpy==1.24.3
+opencv-python==4.8.0
+scipy==1.11.3
+transforms3d==0.4.1 
