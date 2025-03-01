@@ -7,4 +7,5 @@ pyrealsense2==2.54.1
 numpy==1.24.3
 opencv-python==4.8.0
 scipy==1.11.3
-transforms3d==0.4.1 
+transforms3d==0.4.1
+plotly==5.18.0 
