@@ -1,2 +1,5 @@
 pyserial==3.5
-pynmea2==1.19.0 
+pynmea2==1.19.0
+streamlit==1.31.1
+folium==0.15.1
+streamlit-folium==0.18.0 
