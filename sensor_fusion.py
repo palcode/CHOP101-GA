@@ -37,18 +37,61 @@ import pyrealsense2 as rs
 import numpy as np
 import cv2
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict, Any
 import transforms3d as t3d
 from scipy.spatial.transform import Rotation
 from gps_driver import GPSDriver, GPSData
 import threading
 import time
 import logging
+import os
+from pathlib import Path
+import re
+from functools import wraps
 
-logging.basicConfig(level=logging.INFO)
+# Enhanced logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('sensor_fusion.log')
+    ]
+)
 logger = logging.getLogger(__name__)
 
-@dataclass
+# Constants
+MAX_FRAME_WIDTH = 1920
+MAX_FRAME_HEIGHT = 1080
+MIN_FRAME_WIDTH = 320
+MIN_FRAME_HEIGHT = 240
+MAX_FPS = 60
+MIN_FPS = 1
+EARTH_RADIUS_METERS = 6371000
+MIN_MATCHES = 10
+MAX_MATCHES = 1000
+DEFAULT_CONFIDENCE_THRESHOLD = 0.5
+
+def validate_port(port: str) -> bool:
+    """Validate serial port name for security."""
+    # Allow only standard device patterns
+    return bool(re.match(r'^(/dev/tty[A-Za-z0-9]+|COM[0-9]+)$', port))
+
+def validate_frame_params(width: int, height: int, fps: int) -> bool:
+    """Validate frame parameters."""
+    return (MIN_FRAME_WIDTH <= width <= MAX_FRAME_WIDTH and
+            MIN_FRAME_HEIGHT <= height <= MAX_FRAME_HEIGHT and
+            MIN_FPS <= fps <= MAX_FPS)
+
+def thread_safe(func):
+    """Decorator to ensure thread-safe method execution."""
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        with self.lock:
+            return func(self, *args, **kwargs)
+    return wrapper
+
+@dataclass(frozen=True)  # Make dataclass immutable
 class RGBDData:
     """
     Container for RGBD camera data.
@@ -62,7 +105,16 @@ class RGBDData:
     depth_frame: np.ndarray
     timestamp: float
 
-@dataclass
+    def __post_init__(self):
+        """Validate data after initialization."""
+        if not isinstance(self.color_frame, np.ndarray):
+            raise ValueError("color_frame must be a numpy array")
+        if not isinstance(self.depth_frame, np.ndarray):
+            raise ValueError("depth_frame must be a numpy array")
+        if not isinstance(self.timestamp, (int, float)):
+            raise ValueError("timestamp must be a number")
+
+@dataclass(frozen=True)  # Make dataclass immutable
 class PoseEstimate:
     """
     Container for pose estimation results.
@@ -77,6 +129,15 @@ class PoseEstimate:
     orientation: np.ndarray  # quaternion [w, x, y, z]
     confidence: float
     timestamp: float
+
+    def __post_init__(self):
+        """Validate pose data after initialization."""
+        if not isinstance(self.position, np.ndarray) or self.position.shape != (3,):
+            raise ValueError("position must be a 3D numpy array")
+        if not isinstance(self.orientation, np.ndarray) or self.orientation.shape != (4,):
+            raise ValueError("orientation must be a 4D quaternion numpy array")
+        if not 0 <= self.confidence <= 1:
+            raise ValueError("confidence must be between 0 and 1")
 
 class LocalizationFusion:
     """
@@ -103,40 +164,72 @@ class LocalizationFusion:
         lock (threading.Lock): Thread synchronization lock
     """
     
-    def __init__(self, gps_port: str = "/dev/ttyUSB0", gps_baudrate: int = 9600):
+    def __init__(self, gps_port: str = "/dev/ttyUSB0", gps_baudrate: int = 9600,
+                 frame_width: int = 640, frame_height: int = 480, fps: int = 30):
         """
-        Initialize the fusion system.
+        Initialize the fusion system with validated parameters.
         
         Args:
             gps_port (str): Serial port for GPS module
             gps_baudrate (int): Baud rate for GPS communication
+            frame_width (int): Camera frame width
+            frame_height (int): Camera frame height
+            fps (int): Frames per second
+            
+        Raises:
+            ValueError: If any parameter is invalid
+            SecurityError: If port name is potentially unsafe
         """
-        # Initialize RealSense pipeline
+        # Validate inputs
+        if not validate_port(gps_port):
+            raise SecurityError(f"Invalid or unsafe port name: {gps_port}")
+        if not validate_frame_params(frame_width, frame_height, fps):
+            raise ValueError("Invalid frame parameters")
+        if not isinstance(gps_baudrate, int) or gps_baudrate <= 0:
+            raise ValueError("Invalid baudrate")
+
+        # Initialize RealSense pipeline with validated parameters
         self.pipeline = rs.pipeline()
         self.config = rs.config()
-        self.config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-        self.config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+        self.config.enable_stream(rs.stream.color, frame_width, frame_height, 
+                                rs.format.bgr8, fps)
+        self.config.enable_stream(rs.stream.depth, frame_width, frame_height, 
+                                rs.format.z16, fps)
         
-        # Initialize GPS
+        # Initialize GPS with validated parameters
         self.gps = GPSDriver(port=gps_port, baudrate=gps_baudrate)
         
         # Initialize tracking variables
+        self._reset_state()
+        
+        # Threading control
+        self.lock = threading.Lock()
+        self.is_running = False
+        self._stop_event = threading.Event()
+        
+    def _reset_state(self):
+        """Reset internal state variables safely."""
         self.prev_rgbd_data: Optional[RGBDData] = None
         self.current_pose = PoseEstimate(
             position=np.zeros(3),
-            orientation=np.array([1., 0., 0., 0.]),  # Identity quaternion
+            orientation=np.array([1., 0., 0., 0.]),
             confidence=0.0,
-            timestamp=0.0
+            timestamp=time.time()
         )
         
-        # Feature detection and matching
-        self.orb = cv2.ORB_create()
+        # Feature detection and matching with validated parameters
+        self.orb = cv2.ORB_create(
+            nfeatures=1000,
+            scaleFactor=1.2,
+            nlevels=8,
+            edgeThreshold=31,
+            firstLevel=0,
+            WTA_K=2,
+            patchSize=31
+        )
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        
-        # Threading control
-        self.is_running = False
-        self.lock = threading.Lock()
-        
+
+    @thread_safe
     def start(self) -> bool:
         """
         Start the fusion system.
@@ -147,28 +240,37 @@ class LocalizationFusion:
         Returns:
             bool: True if successfully started, False otherwise
         """
+        if self.is_running:
+            logger.warning("System is already running")
+            return False
+            
         try:
-            # Start RealSense pipeline
             self.pipeline.start(self.config)
             
-            # Connect GPS
             if not self.gps.connect():
                 logger.error("Failed to connect to GPS")
                 self.pipeline.stop()
                 return False
             
             self.is_running = True
+            self._stop_event.clear()
             
-            # Start processing thread
-            self.process_thread = threading.Thread(target=self._process_loop)
+            self.process_thread = threading.Thread(
+                target=self._process_loop,
+                name="SensorFusionThread"
+            )
+            self.process_thread.daemon = True  # Ensure thread terminates with main program
             self.process_thread.start()
             
+            logger.info("Sensor fusion system started successfully")
             return True
             
         except Exception as e:
             logger.error(f"Error starting sensor fusion: {e}")
+            self._cleanup()
             return False
             
+    @thread_safe
     def stop(self):
         """
         Stop the fusion system and cleanup resources.
@@ -176,12 +278,34 @@ class LocalizationFusion:
         This method ensures proper shutdown of all components including
         the RealSense pipeline, GPS connection, and processing thread.
         """
-        self.is_running = False
-        if hasattr(self, 'process_thread'):
-            self.process_thread.join()
-        self.pipeline.stop()
-        self.gps.disconnect()
-        
+        if not self.is_running:
+            return
+
+        try:
+            self._stop_event.set()
+            self.is_running = False
+            
+            if hasattr(self, 'process_thread'):
+                self.process_thread.join(timeout=5.0)  # Wait with timeout
+                if self.process_thread.is_alive():
+                    logger.warning("Process thread did not terminate properly")
+            
+            self._cleanup()
+            logger.info("Sensor fusion system stopped successfully")
+            
+        except Exception as e:
+            logger.error(f"Error stopping sensor fusion: {e}")
+            
+    def _cleanup(self):
+        """Clean up resources safely."""
+        try:
+            if hasattr(self, 'pipeline'):
+                self.pipeline.stop()
+            if hasattr(self, 'gps'):
+                self.gps.disconnect()
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+
     def get_current_pose(self) -> PoseEstimate:
         """
         Get the latest fused pose estimate.

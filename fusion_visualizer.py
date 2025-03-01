@@ -32,40 +32,40 @@ import folium
 from streamlit_folium import folium_static
 import cv2
 import numpy as np
-from sensor_fusion import LocalizationFusion
+from sensor_fusion import LocalizationFusion, PoseEstimate
 import time
 from datetime import datetime
 import threading
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from typing import Optional, Dict, Any, List, Tuple
+import logging
+from pathlib import Path
+import os
 
-# Add plotly to requirements
-# Update requirements.txt with: plotly==5.18.0
-
-# Page configuration
-st.set_page_config(
-    page_title="Enhanced Sensor Fusion Visualizer",
-    page_icon="🤖",
-    layout="wide"
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('visualizer.log')
+    ]
 )
+logger = logging.getLogger(__name__)
 
-# Custom CSS
-st.markdown("""
-    <style>
-    .main {
-        padding: 0rem 1rem;
-    }
-    .stButton>button {
-        width: 100%;
-    }
-    .css-1v0mbdj {
-        width: 100%;
-    }
-    .plot-container {
-        height: 400px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# Constants
+MAX_TRAJECTORY_POINTS = 100
+MIN_UPDATE_INTERVAL = 0.01  # seconds
+MAX_UPDATE_INTERVAL = 1.0   # seconds
+DEFAULT_MAP_ZOOM = 15
+EARTH_RADIUS_METERS = 6371000
+DEFAULT_PLOT_HEIGHT = 400
+MAX_RETRIES = 3
+
+class VisualizerError(Exception):
+    """Custom exception for visualizer errors."""
+    pass
 
 class EnhancedFusionVisualizer:
     """
@@ -85,13 +85,38 @@ class EnhancedFusionVisualizer:
     """
     
     def __init__(self):
-        """Initialize the visualization system with default values."""
-        self.fusion = None
-        self.is_running = False
-        self.current_frame = None
-        self.current_depth = None
-        self.trajectory = []  # Store position history
+        """Initialize the visualization system with safety checks."""
+        self.fusion: Optional[LocalizationFusion] = None
+        self.is_running: bool = False
+        self.current_frame: Optional[np.ndarray] = None
+        self.current_depth: Optional[np.ndarray] = None
+        self.trajectory: List[np.ndarray] = []
         self.lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._last_update = time.time()
+        
+    def validate_gps_params(self, port: str, baudrate: int) -> bool:
+        """
+        Validate GPS parameters for security.
+        
+        Args:
+            port (str): Serial port name
+            baudrate (int): Communication baudrate
+            
+        Returns:
+            bool: True if parameters are valid
+        """
+        # Validate port name
+        if not isinstance(port, str) or not port.strip():
+            logger.error("Invalid port name")
+            return False
+            
+        # Validate baudrate
+        if not isinstance(baudrate, int) or baudrate <= 0:
+            logger.error("Invalid baudrate")
+            return False
+            
+        return True
         
     def start(self, gps_port: str, gps_baudrate: int) -> bool:
         """
@@ -104,14 +129,34 @@ class EnhancedFusionVisualizer:
         Returns:
             bool: True if successfully started, False otherwise
         """
-        self.fusion = LocalizationFusion(gps_port, gps_baudrate)
-        if not self.fusion.start():
+        if self.is_running:
+            logger.warning("System is already running")
             return False
             
-        self.is_running = True
-        self.frame_thread = threading.Thread(target=self._update_frame)
-        self.frame_thread.start()
-        return True
+        if not self.validate_gps_params(gps_port, gps_baudrate):
+            return False
+            
+        try:
+            self.fusion = LocalizationFusion(gps_port, gps_baudrate)
+            if not self.fusion.start():
+                return False
+                
+            self.is_running = True
+            self._stop_event.clear()
+            self.frame_thread = threading.Thread(
+                target=self._update_frame,
+                name="VisualizerThread"
+            )
+            self.frame_thread.daemon = True
+            self.frame_thread.start()
+            
+            logger.info("Visualization system started successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error starting visualization: {e}")
+            self._cleanup()
+            return False
         
     def stop(self):
         """
@@ -120,13 +165,37 @@ class EnhancedFusionVisualizer:
         This method ensures proper shutdown of all components including
         the fusion system and processing thread.
         """
-        self.is_running = False
-        if self.fusion:
-            self.fusion.stop()
-        if hasattr(self, 'frame_thread'):
-            self.frame_thread.join()
+        if not self.is_running:
+            return
             
-    def _colorize_depth(self, depth_image: np.ndarray) -> np.ndarray:
+        try:
+            self._stop_event.set()
+            self.is_running = False
+            
+            if hasattr(self, 'frame_thread'):
+                self.frame_thread.join(timeout=5.0)
+                if self.frame_thread.is_alive():
+                    logger.warning("Frame thread did not terminate properly")
+            
+            self._cleanup()
+            logger.info("Visualization system stopped successfully")
+            
+        except Exception as e:
+            logger.error(f"Error stopping visualization: {e}")
+            
+    def _cleanup(self):
+        """Clean up resources safely."""
+        try:
+            if self.fusion:
+                self.fusion.stop()
+            self.fusion = None
+            self.current_frame = None
+            self.current_depth = None
+            self.trajectory.clear()
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+            
+    def _colorize_depth(self, depth_image: np.ndarray) -> Optional[np.ndarray]:
         """
         Convert depth image to colormap for better visualization.
         
@@ -136,12 +205,17 @@ class EnhancedFusionVisualizer:
         Returns:
             np.ndarray: Colorized depth image using JET colormap
         """
-        if depth_image is None:
+        if depth_image is None or not isinstance(depth_image, np.ndarray):
             return None
-        normalized_depth = cv2.normalize(depth_image, None, 0, 255, cv2.NORM_MINMAX)
-        normalized_depth = normalized_depth.astype(np.uint8)
-        depth_colormap = cv2.applyColorMap(normalized_depth, cv2.COLORMAP_JET)
-        return depth_colormap
+            
+        try:
+            normalized_depth = cv2.normalize(depth_image, None, 0, 255, cv2.NORM_MINMAX)
+            normalized_depth = normalized_depth.astype(np.uint8)
+            depth_colormap = cv2.applyColorMap(normalized_depth, cv2.COLORMAP_JET)
+            return depth_colormap
+        except Exception as e:
+            logger.error(f"Error colorizing depth image: {e}")
+            return None
             
     def _update_frame(self):
         """
@@ -151,43 +225,60 @@ class EnhancedFusionVisualizer:
         the visualization data including camera feeds, pose information,
         and trajectory history.
         """
-        while self.is_running:
-            rgbd_data = self.fusion._get_rgbd_data()
-            if rgbd_data is None:
-                continue
+        retry_count = 0
+        
+        while not self._stop_event.is_set():
+            try:
+                # Rate limiting
+                current_time = time.time()
+                elapsed = current_time - self._last_update
+                if elapsed < MIN_UPDATE_INTERVAL:
+                    time.sleep(MIN_UPDATE_INTERVAL - elapsed)
                 
-            # Get color and depth frames
+                rgbd_data = self.fusion._get_rgbd_data()
+                if rgbd_data is None:
+                    retry_count += 1
+                    if retry_count > MAX_RETRIES:
+                        logger.error("Failed to get RGBD data after maximum retries")
+                        break
+                    continue
+                
+                retry_count = 0  # Reset counter on successful read
+                
+                # Thread-safe data update
+                with self.lock:
+                    self._update_visualization_data(rgbd_data)
+                
+                self._last_update = time.time()
+                
+            except Exception as e:
+                logger.error(f"Error in visualization update: {e}")
+                retry_count += 1
+                if retry_count > MAX_RETRIES:
+                    break
+                    
+    def _update_visualization_data(self, rgbd_data):
+        """Update visualization data thread-safely."""
+        try:
             color_frame = rgbd_data.color_frame.copy()
             depth_frame = rgbd_data.depth_frame.copy()
             
-            # Get current pose
             pose = self.fusion.get_current_pose()
             
-            # Store trajectory
+            # Update trajectory with bounds checking
             self.trajectory.append(pose.position)
-            if len(self.trajectory) > 100:  # Keep last 100 positions
+            if len(self.trajectory) > MAX_TRAJECTORY_POINTS:
                 self.trajectory.pop(0)
             
-            # Draw pose information on frame
-            cv2.putText(color_frame, f"Confidence: {pose.confidence:.2f}", 
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            
-            # Draw feature points if available
-            if hasattr(self.fusion, 'prev_rgbd_data'):
-                prev_frame = cv2.cvtColor(self.fusion.prev_rgbd_data.color_frame, 
-                                        cv2.COLOR_BGR2GRAY)
-                kp, _ = self.fusion.orb.detectAndCompute(prev_frame, None)
-                color_frame = cv2.drawKeypoints(color_frame, kp, None, 
-                                             color=(0, 255, 0), 
-                                             flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-            
-            with self.lock:
+            # Update frame with safety checks
+            if color_frame.size > 0 and depth_frame.size > 0:
                 self.current_frame = color_frame
                 self.current_depth = depth_frame
+                
+        except Exception as e:
+            logger.error(f"Error updating visualization data: {e}")
             
-            time.sleep(0.03)  # ~30 FPS
-            
-    def get_current_data(self) -> dict:
+    def get_current_data(self) -> Optional[Dict[str, np.ndarray]]:
         """
         Get the latest sensor data for visualization.
         
@@ -198,15 +289,22 @@ class EnhancedFusionVisualizer:
                 - 'depth_colored': Colorized depth visualization
         """
         with self.lock:
-            if self.current_frame is not None and self.current_depth is not None:
+            if self.current_frame is None or self.current_depth is None:
+                return None
+                
+            try:
                 return {
                     'color': self.current_frame.copy(),
                     'depth': self.current_depth.copy(),
                     'depth_colored': self._colorize_depth(self.current_depth)
                 }
-            return None
+            except Exception as e:
+                logger.error(f"Error getting current data: {e}")
+                return None
 
-def create_map(latitude: float, longitude: float, trajectory: list = None, zoom: int = 15) -> folium.Map:
+def create_map(latitude: float, longitude: float, 
+              trajectory: Optional[List[np.ndarray]] = None,
+              zoom: int = DEFAULT_MAP_ZOOM) -> folium.Map:
     """
     Create an interactive map with current position and trajectory.
     
@@ -219,33 +317,51 @@ def create_map(latitude: float, longitude: float, trajectory: list = None, zoom:
     Returns:
         folium.Map: Interactive map with markers and trajectory
     """
-    m = folium.Map(location=[latitude, longitude], zoom_start=zoom)
-    
-    # Add current position marker
-    folium.Marker(
-        [latitude, longitude],
-        popup="Current Location",
-        icon=folium.Icon(color='red', icon='info-sign')
-    ).add_to(m)
-    
-    # Add trajectory if available
-    if trajectory and len(trajectory) > 1:
-        trajectory_coords = []
-        for pos in trajectory:
-            lat = np.degrees(pos[1] / 6371000)  # Earth radius in meters
-            lon = np.degrees(pos[0] / (6371000 * np.cos(np.radians(lat))))
-            trajectory_coords.append([lat, lon])
+    try:
+        # Validate inputs
+        if not isinstance(latitude, (int, float)) or not isinstance(longitude, (int, float)):
+            raise ValueError("Invalid coordinates")
+        if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+            raise ValueError("Coordinates out of range")
+            
+        m = folium.Map(location=[latitude, longitude], zoom_start=zoom)
         
-        folium.PolyLine(
-            trajectory_coords,
-            weight=2,
-            color='blue',
-            opacity=0.8
+        # Add current position
+        folium.Marker(
+            [latitude, longitude],
+            popup="Current Location",
+            icon=folium.Icon(color='red', icon='info-sign')
         ).add_to(m)
-    
-    return m
+        
+        # Add trajectory with validation
+        if trajectory and len(trajectory) > 1:
+            trajectory_coords = []
+            for pos in trajectory:
+                if not isinstance(pos, np.ndarray) or pos.shape != (3,):
+                    logger.warning("Invalid trajectory point, skipping")
+                    continue
+                    
+                lat = np.degrees(pos[1] / EARTH_RADIUS_METERS)
+                lon = np.degrees(pos[0] / (EARTH_RADIUS_METERS * np.cos(np.radians(lat))))
+                if -90 <= lat <= 90 and -180 <= lon <= 180:
+                    trajectory_coords.append([lat, lon])
+            
+            if trajectory_coords:
+                folium.PolyLine(
+                    trajectory_coords,
+                    weight=2,
+                    color='blue',
+                    opacity=0.8
+                ).add_to(m)
+        
+        return m
+        
+    except Exception as e:
+        logger.error(f"Error creating map: {e}")
+        # Return a default map centered at (0, 0)
+        return folium.Map(location=[0, 0], zoom_start=2)
 
-def create_3d_trajectory(trajectory: list) -> go.Figure:
+def create_3d_trajectory(trajectory: List[np.ndarray]) -> Optional[go.Figure]:
     """
     Create an interactive 3D plot of the movement trajectory.
     
@@ -255,38 +371,44 @@ def create_3d_trajectory(trajectory: list) -> go.Figure:
     Returns:
         go.Figure: Plotly figure with 3D trajectory visualization
     """
-    if not trajectory:
+    if not trajectory or not all(isinstance(p, np.ndarray) and p.shape == (3,) 
+                               for p in trajectory):
         return None
         
-    trajectory = np.array(trajectory)
-    fig = go.Figure(data=[go.Scatter3d(
-        x=trajectory[:, 0],
-        y=trajectory[:, 1],
-        z=trajectory[:, 2],
-        mode='lines+markers',
-        marker=dict(
-            size=2,
-            color=np.linspace(0, 1, len(trajectory)),
-            colorscale='Viridis',
-        ),
-        line=dict(
-            color='blue',
-            width=2
+    try:
+        trajectory_array = np.array(trajectory)
+        fig = go.Figure(data=[go.Scatter3d(
+            x=trajectory_array[:, 0],
+            y=trajectory_array[:, 1],
+            z=trajectory_array[:, 2],
+            mode='lines+markers',
+            marker=dict(
+                size=2,
+                color=np.linspace(0, 1, len(trajectory_array)),
+                colorscale='Viridis',
+            ),
+            line=dict(
+                color='blue',
+                width=2
+            )
+        )])
+        
+        fig.update_layout(
+            scene=dict(
+                xaxis_title='X (m)',
+                yaxis_title='Y (m)',
+                zaxis_title='Z (m)',
+                aspectmode='data'
+            ),
+            margin=dict(l=0, r=0, b=0, t=0),
+            height=DEFAULT_PLOT_HEIGHT
         )
-    )])
-    
-    fig.update_layout(
-        scene=dict(
-            xaxis_title='X (m)',
-            yaxis_title='Y (m)',
-            zaxis_title='Z (m)',
-            aspectmode='data'
-        ),
-        margin=dict(l=0, r=0, b=0, t=0),
-        height=400
-    )
-    
-    return fig
+        
+        return fig
+        
+    except Exception as e:
+        logger.error(f"Error creating 3D trajectory: {e}")
+        return None
 
 def main():
     """
@@ -299,6 +421,20 @@ def main():
     - Real-time data updates
     - Visualization components
     """
+    try:
+        st.title("🤖 Enhanced Sensor Fusion Visualizer")
+        
+        # Initialize session state safely
+        if 'visualizer' not in st.session_state:
+            st.session_state.visualizer = EnhancedFusionVisualizer()
+        
+        # Sidebar configuration
+        with st.sidebar:
+            st.header("Configuration")
+            gps_port = st.text_input("GPS Port", value="/dev/ttyUSB0")
+            gps_baudrate = st.number_input("GPS Baudrate", value=9600, min_value=1200)
+            
+            if not st.session_state.visualizer.is_running:
     st.title("🤖 Enhanced Sensor Fusion Visualizer")
     
     # Initialize session state
